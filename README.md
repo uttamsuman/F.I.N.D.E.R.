@@ -4,4 +4,4 @@ It is an iterative optimization scheme which builds on the direct computaion of 
 
 This repository contains Python codes for a number of optimization problems solved using FINDER. and demonstrates the superiority of this algorithm over the Adam optimizer. 
 
-Note : The examples require importing the FINDER_core.py module. So it must be downloaded in the same directory.
+Note : The examples require importing the FINDER_core.py module. So it must be downloaded in the same directory or a path must be specified while importing.
