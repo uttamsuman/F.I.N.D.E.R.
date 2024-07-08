@@ -1,4 +1,3 @@
-
 import torch
 import numpy as np
 
@@ -77,15 +76,16 @@ class FINDER(torch.optim.Optimizer):
         self.arx[:,:] = self.xmin
         self.arx[:,1:] = self.xmin + (self.R * self.rand.uniform_(-1,1)).T
 
-    def sorted_x_y_grad(self, inputs, labels = None, no_grad = False):
+    def x_y_grad(self, inputs, labels = None, no_grad = False):
         """set grads = True for loss and gradient computation on initial ensemble
            set grads = False for only loss computation on new ensemble"""
         if no_grad == False:
             for i, element in enumerate(self.arx.T):
                 self.y[i], self.y_grad[:,i] = self.loss_grad(element, inputs, labels, no_grad)
-
+            
             self.sorted_indices[:] = torch.argsort(self.y[:self.p])
-
+            self.arx[:,:] = self.arx[:,self.sorted_indices]
+            self.y_grad[:,:] = self.y_grad[:, self.sorted_indices]
             self.idx[:] = self.sorted_indices[0]
             self.y0[:] = self.y[self.idx]
             self.xmiin[:] = self.arx[:,self.idx]
@@ -161,7 +161,7 @@ class FINDER(torch.optim.Optimizer):
         self.generate_arx()
         
         '''loss and gradient computation and finding fittest particle in initial ensemble'''
-        self.sorted_x_y_grad(inputs, labels, no_grad=False)
+        self.x_y_grad(inputs, labels, no_grad=False)
         
         '''compute B_ = B**γ'''
         self.calc_invH()
@@ -179,9 +179,8 @@ class FINDER(torch.optim.Optimizer):
         self.new_ensemble[:,0:1] = self.xmiin
         self.new_ensemble[:,1:] = self.arx_new
 
-
         '''loss computation without gradient computation'''
-        self.sorted_x_y_grad(inputs, labels, no_grad=True)
+        self.x_y_grad(inputs, labels, no_grad=True)
 
         '''compute parameter-wise sampling radius'''
         self.cal_sampling_radius()
