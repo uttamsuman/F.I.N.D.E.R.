@@ -136,7 +136,7 @@ class FINDER(torch.optim.Optimizer):
     def Armijo_rule(self, inputs, labels = None):
         """Armijo rule for computation of step size multiplier"""
         step = 0.1
-        c_1 = 0.01
+        c_α = 0.01
         pvec = - self.Δ[:,self.idx] # direction of descent
         δ = 1.0
         pvec1 = pvec.view(-1,1)
@@ -145,7 +145,7 @@ class FINDER(torch.optim.Optimizer):
         while δ > 1e-6:
             self.new_x[:] = self.xmiin - δ * self.Δ[:,self.idx:self.idx+1]
             loss_new = self.loss_grad(self.new_x, inputs, labels, no_grad=True)
-            min_loss = - c_1 * δ * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
+            min_loss = - c_α * δ * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
             armijo = loss_new - self.y0 - min_loss.item()
             if armijo < -0:
                 step = δ
