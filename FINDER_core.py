@@ -88,7 +88,7 @@ class FINDER(torch.optim.Optimizer):
             self.y_grad[:,:] = self.y_grad[:, self.sorted_indices]
             self.idx[:] = self.sorted_indices[0]
             self.y0[:] = self.y[self.idx]
-            self.xmiin[:] = self.arx[:,self.idx]
+            self.xmiin[:,0] = self.arx[:,0]
         
         else:
             for i, element in enumerate(self.new_ensemble.T):
