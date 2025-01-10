@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import scipy
 
 device = ("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device for FINDER")
@@ -7,8 +8,8 @@ print(f"Using {device} device for FINDER")
 class FINDER(torch.optim.Optimizer):
     """ base class for FINDER optimizer """
     
-    def __init__(self,model = None, p = 5, R = None, Γ = None, Δ = None, θ = 0.9, γ = 1, cs = 0.1, clamps = [0.01, 0.01]):
-        assert isinstance(p, int) and p >= 3, "Variable p must be a natural number greater than or equal to 3"
+    def __init__(self,model = None, p = 5, R = None, Γ = None, Δ = None, θ = 0.9, γ = 1, cs = 0.1, clamps = [0.0001, 0.0001], line_search = "backtracking"):
+        assert isinstance(p, int) and p >= 2, "Variable p must be a natural number greater than or equal to 2"
         if model != None: # used for ANN problems
             self.model = model
             self.state_X = torch.nn.utils.parameters_to_vector(self.model.parameters()).view(-1,1)
@@ -18,14 +19,20 @@ class FINDER(torch.optim.Optimizer):
             else:
                 self.loss_grad = self.model.loss_grad
         else:
-            raise "No model passed while creating the object of class FINDER."
+            raise AttributeError("No model passed while creating the object of class FINDER.")
+
+        if line_search == "backtracking" or line_search == "quadratic" or line_search=="None":
+            pass
+        else:
+            raise AttributeError("choose either backtracking or quadratic")
         defaults = dict(qwerty = "FINDER", θ = θ, γ = γ, cs = cs, clamps = clamps)
         super(FINDER, self).__init__(params=self.model.parameters(), defaults = defaults)
         self.θ = θ
         self.p = p
         self.γ = γ
         self.cs = cs
-        self.clamps = clamps 
+        self.clamps = clamps
+        self.line_search = line_search
         if Δ == None:
             self.Δ = torch.zeros(self.N,self.p).to(device)
         else:
@@ -67,6 +74,7 @@ class FINDER(torch.optim.Optimizer):
         self.rand = torch.empty(self.p-1, self.N).to(device)
         # to store increment of current iteration
         self.Hg = torch.empty_like(self.Δ)
+        self.count = 0
         
     def generate_arx(self):
         """generates an ensemble of p particles by sampling (p-1) particles 
@@ -82,7 +90,7 @@ class FINDER(torch.optim.Optimizer):
         if no_grad == False:
             for i, element in enumerate(self.arx.T):
                 self.y[i], self.y_grad[:,i] = self.loss_grad(element, inputs, labels, no_grad)
-            
+            self.y = torch.nan_to_num(self.y, nan=max(self.y))
             self.sorted_indices[:] = torch.argsort(self.y[:self.p])
             self.arx[:,:] = self.arx[:,self.sorted_indices]
             self.y_grad[:,:] = self.y_grad[:, self.sorted_indices]
@@ -93,6 +101,7 @@ class FINDER(torch.optim.Optimizer):
         else:
             for i, element in enumerate(self.new_ensemble.T):
                 self.y[i] = self.loss_grad(element, inputs, labels, no_grad)
+            self.y = torch.nan_to_num(self.y, nan=max(self.y))
             self.y0[:] = self.y.min()
             
             self.xmin[:,0] = self.new_ensemble[:,torch.argmin(self.y)]
@@ -106,7 +115,7 @@ class FINDER(torch.optim.Optimizer):
             torch.sub(self.y_grad, torch.mean(self.y_grad, 1, True), out=self.b)
             torch.sum(self.a*self.b, dim=1, out=self.c[:,0])
             torch.sum(self.b*self.b, dim=1, out=self.d[:,0])
-            torch.div(self.c, self.d, out=self.B)
+            torch.div(self.c, (self.d + (0)*torch.ones_like(self.d)), out=self.B)
             torch.clamp(torch.nan_to_num(self.B), 0, out=self.B_)
             self.B_ **= self.γ
 
@@ -130,10 +139,10 @@ class FINDER(torch.optim.Optimizer):
         self.Δ *= self.θ
         torch.mul(self.B_, self.y_grad, out=self.Hg)
         self.Δ += self.Hg
-        
+        # self.Δ /= (1 - self.θ**self.count)
 
 
-    def Armijo_rule(self, inputs, labels = None):
+    def backtracking(self, inputs = None, labels = None):
         """Armijo rule for computation of step size multiplier"""
         step = 0.1
         c_α = 0.01
@@ -141,11 +150,11 @@ class FINDER(torch.optim.Optimizer):
         δ = 1.0
         pvec1 = pvec.view(-1,1)
         g = self.y_grad[:,self.idx]
-        
+        min_loss = - c_α * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
         while δ > 1e-6:
             self.new_x[:] = self.xmiin - δ * self.Δ[:,self.idx:self.idx+1]
             loss_new = self.loss_grad(self.new_x, inputs, labels, no_grad=True)
-            min_loss = - c_α * δ * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
+            min_loss *= δ
             armijo = loss_new - self.y0 - min_loss.item()
             if armijo < -0:
                 step = δ
@@ -153,10 +162,38 @@ class FINDER(torch.optim.Optimizer):
             else:
                 δ *= 0.5
         return step
-
-
-    def step(self, inputs, labels = None):
         
+    def quadratic_interpolate(self, inputs = None, labels=None):
+        step = 0.1
+        c_α = 0.01
+        pvec = - self.Δ[:,self.idx] # direction of descent
+        δ = 1.0
+        pvec1 = pvec.view(-1,1)
+        count = 0
+        min_loss = - c_α * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
+        while δ > 1e-6 and count < 20:
+            f = {0.0 : self.y0, δ / 2 : self.y0, δ : self.y0}
+            min_loss *=  δ
+            for alpha in list(f.keys())[1:]:
+                self.new_x[:] = self.xmiin - alpha * self.Δ[:,self.idx:self.idx+1]
+                f[alpha] = self.loss_grad(self.new_x, inputs, labels, no_grad=True)
+            poly1d = scipy.interpolate.lagrange(np.fromiter(f.keys(), dtype = np.float32),np.fromiter(f.values(), dtype=np.float32))
+            res = scipy.optimize.minimize_scalar(poly1d, bounds=(0.0,δ), method="bounded")
+            f[res.x] = self.loss_grad(self.xmiin - res.x * self.Δ[:,self.idx:self.idx+1], inputs, labels, no_grad=True)
+            loss_new = min(f.values())
+            new_alpha = min(f, key = f.get)
+            armijo = loss_new - self.y0 - min_loss.item()
+            count += 1
+            if armijo < -0.0:
+                step = new_alpha
+                break
+            else:
+                δ *= 0.5#new_alpha
+        return step
+        
+
+    def step(self, inputs = None, labels = None, lr = 0.1):
+        self.count += 1        
         '''generate inital ensemble say X'''
         self.generate_arx()
         
@@ -170,8 +207,12 @@ class FINDER(torch.optim.Optimizer):
         self.calc_increment()
         
         '''compute step size multiplier α using Armijo rule'''
-        self.α = self.Armijo_rule(inputs, labels)
-
+        if self.line_search=="backtracking":
+            self.α = self.backtracking(inputs, labels)
+        elif self.line_search=="quadratic":
+            self.α = self.quadratic_interpolate(inputs, labels)
+        elif self.line_search =="None":
+            self.α = lr
         '''update the initial ensemble'''
         self.update_ensemble()
 
