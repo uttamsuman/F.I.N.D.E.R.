@@ -21,10 +21,10 @@ class FINDER(torch.optim.Optimizer):
         else:
             raise AttributeError("No model passed while creating the object of class FINDER.")
 
-        if line_search == "backtracking" or line_search == "quadratic" or line_search=="None":
+        if line_search == "backtracking" or line_search == "quadratic" or line_search=="None" or line_search=="cubic":
             pass
         else:
-            raise AttributeError("choose either backtracking or quadratic")
+            raise AttributeError("choose either backtracking or quadratic or cubic")
         defaults = dict(qwerty = "FINDER", θ = θ, γ = γ, cs = cs, clamps = clamps)
         super(FINDER, self).__init__(params=self.model.parameters(), defaults = defaults)
         self.θ = θ
@@ -171,7 +171,7 @@ class FINDER(torch.optim.Optimizer):
         pvec1 = pvec.view(-1,1)
         count = 0
         min_loss = - c_α * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
-        while δ > 1e-6 and count < 20:
+        while δ > 1e-6:
             f = {0.0 : self.y0, δ / 2 : self.y0, δ : self.y0}
             min_loss *=  δ
             for alpha in list(f.keys())[1:]:
@@ -190,7 +190,34 @@ class FINDER(torch.optim.Optimizer):
             else:
                 δ *= 0.5#new_alpha
         return step
-        
+
+    def cubic_interpolate(self, inputs = None, labels=None):
+        step = 0.1
+        c_α = 0.01
+        pvec = - self.Δ[:,self.idx] # direction of descent
+        δ = 1.0
+        pvec1 = pvec.view(-1,1)
+        count = 0
+        min_loss = - c_α * torch.dot(self.Δ[:,self.idx.item()], self.y_grad[:,self.idx.item()])
+        while δ > 1e-6:
+            f = {0.0 : self.y0, δ / 3 : self.y0, 2*δ/3 : self.y0, δ : self.y0}
+            min_loss *=  δ/ 2
+            for alpha in list(f.keys())[1:]:
+                self.new_x[:] = self.xmiin - alpha * self.Δ[:,self.idx:self.idx+1]
+                f[alpha] = self.loss_grad(self.new_x, inputs, labels, no_grad=True)
+            poly1d = scipy.interpolate.lagrange(np.fromiter(f.keys(), dtype = np.float32),np.fromiter(f.values(), dtype=np.float32))
+            res = scipy.optimize.minimize_scalar(poly1d, bounds=(0.0,δ), method="bounded")
+            f[res.x] = self.loss_grad(self.xmiin - res.x * self.Δ[:,self.idx:self.idx+1], inputs, labels, no_grad=True)
+            loss_new = min(f.values())
+            new_alpha = min(f, key = f.get)
+            armijo = loss_new - self.y0 - min_loss.item()
+            
+            if armijo < -0.0:
+                step = new_alpha
+                break
+            else:
+                δ *= 0.5#new_alpha
+        return step
 
     def step(self, inputs = None, labels = None, lr = 0.1):
         self.count += 1        
@@ -211,6 +238,8 @@ class FINDER(torch.optim.Optimizer):
             self.α = self.backtracking(inputs, labels)
         elif self.line_search=="quadratic":
             self.α = self.quadratic_interpolate(inputs, labels)
+        elif self.line_search == "cubic":
+            self.α = self.cubic_interpolate(inputs, labels)
         elif self.line_search =="None":
             self.α = lr
         '''update the initial ensemble'''
